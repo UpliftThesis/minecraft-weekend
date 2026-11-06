@@ -51,6 +51,14 @@ build="${BUILD_DIR:-$here/build/$config}"
 mkdir -p "$build/obj" "$build/bin"
 TMPDIR="$build"; export TMPDIR
 
+# Objects are reused only if they were compiled with the same compiler and flags;
+# otherwise drop them all so a flag change (e.g. after a git pull) takes effect.
+flags_key="$cc $cflags $incs"
+if [ ! -f "$build/flags.txt" ] || [ "$(cat "$build/flags.txt")" != "$flags_key" ]; then
+    rm -f "$build"/obj/*.o
+    printf '%s\n' "$flags_key" > "$build/flags.txt"
+fi
+
 # ---- 1. headless game library (all of src/ except main.c) ----
 printf '== building headless game library (%s)\n' "$config"
 srcs=$(cd "$src_root" && find src -name '*.c' ! -path src/main.c | sort)
