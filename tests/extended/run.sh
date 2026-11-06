@@ -30,7 +30,12 @@ cc=${CC:-cc}
 jobs=${JOBS:-8}
 filter=${1:-}
 
-cflags="-std=gnu11 -D_GNU_SOURCE -g -O1 -fno-strict-aliasing"
+cflags="-std=gnu11 -g -O1 -fno-strict-aliasing"
+# glibc needs _GNU_SOURCE to declare qsort_r. Define it only on Linux: on macOS it
+# would make src/util/sort.h pick the glibc qsort_r argument order, which crashes.
+if [ "$(uname -s)" = Linux ]; then
+    cflags="$cflags -D_GNU_SOURCE"
+fi
 config=default
 if [ "${SANITIZE:-0}" = 1 ]; then
     cflags="$cflags -fsanitize=address,undefined -fno-omit-frame-pointer"

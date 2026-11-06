@@ -1,4 +1,8 @@
+/* glibc needs _GNU_SOURCE for qsort_r. Only define it on Linux: on macOS it would
+   make src/util/sort.h use the glibc qsort_r argument order and crash. */
+#ifdef __linux__
 #define _GNU_SOURCE
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
