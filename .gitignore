@@ -1,5 +1,8 @@
 bin/game
 
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
 *.icloud
 .DS_Store
 .vscode
