@@ -6,6 +6,21 @@ const f32 MOVEMENT_EPSILON = 0.01f;
 
 const vec3s GRAVITY = (vec3s) {{ 0, -0.0086f, 0 }};
 
+// All state required by the move_axis / scan_colliders / resolve_collision
+// helper chain.  Passing a single pointer replaces 5-7 individual args.
+typedef struct {
+    AABB        origin;        // original AABB passed to move_axis
+    AABB        moved;         // displaced copy (updated per-collider)
+    f32         disp;          // accumulated displacement along axis
+    f32         movement;      // initial movement scalar
+    vec3s       axis;          // unit direction axis
+    const AABB *colliders;     // collider array
+    size_t      count;         // number of colliders
+    f32         sign;          // sign(movement), pre-computed
+    size_t      axis_index;    // which axis component is active (0-2)
+    size_t      hit_index;     // index of the collider being resolved
+} CollisionCtx;
+
 // Find which component of a unit axis vector is non-zero (returns 0, 1, or 2).
 static size_t find_axis_index(vec3s axis) {
     size_t idx = 0;
@@ -16,30 +31,30 @@ static size_t find_axis_index(vec3s axis) {
 }
 
 // Scan all colliders and resolve against the first hit; return true when
-// displacement falls below epsilon so that the caller can stop iterating.
-static bool scan_colliders(AABB *aabb, AABB *moved, const AABB *colliders,
-                           size_t count, vec3s *d_v, f32 m_sign, size_t axis_index) {
-    for (size_t i = 0; i < count; i++) {
-        if (glms_aabb_aabb(*moved, colliders[i]) &&
-            resolve_collision(aabb, moved, &colliders[i], d_v, m_sign, axis_index)) {
+// displacement falls below epsilon so that move_axis can short-circuit.
+static bool scan_colliders(CollisionCtx *ctx) {
+    for (size_t i = 0; i < ctx->count; i++) {
+        ctx->hit_index = i;
+        if (glms_aabb_aabb(ctx->moved, ctx->colliders[i]) &&
+            resolve_collision(ctx)) {
             return true;
         }
     }
     return false;
 }
 
-static f32 move_axis(AABB aabb, f32 movement, vec3s axis, AABB *colliders, size_t size) {
-    vec3s d_v = glms_vec3_scale(axis, movement);
-    f32 m_sign = sign(movement);
-    size_t axis_index = find_axis_index(axis);
+static f32 move_axis(CollisionCtx *ctx) {
+    ctx->sign = sign(ctx->movement);
+    ctx->axis_index = find_axis_index(ctx->axis);
+    ctx->disp = ctx->movement;
 
-    AABB moved;
-    glms_aabb_transform(aabb, glms_translate_make(d_v), moved);
+    vec3s d_v = glms_vec3_scale(ctx->axis, ctx->disp);
+    glms_aabb_transform(ctx->origin, glms_translate_make(d_v), ctx->moved);
 
-    if (scan_colliders(&aabb, &moved, colliders, size, &d_v, m_sign, axis_index))
+    if (scan_colliders(ctx))
         return 0.0f;
 
-    f32 result = d_v.raw[axis_index];
+    f32 result = ctx->disp;
     return fabsf(result) <= F32_EPSILON ? 0.0f : result; 
 }
 
@@ -52,7 +67,15 @@ static vec3s move(AABB aabb, vec3s movement, AABB *colliders, size_t size) {
         vec3s axis = GLMS_VEC3_ZERO;
         axis.raw[i] = 1.0f;
 
-        f32 movement_axis = move_axis(current, movement.raw[i], axis, colliders, size);
+        CollisionCtx ctx = {
+            .origin    = current,
+            .movement  = movement.raw[i],
+            .axis      = axis,
+            .colliders = colliders,
+            .count     = size,
+        };
+        f32 movement_axis = move_axis(&ctx);
+
         glms_aabb_transform(
             current,
             glms_translate_make(glms_vec3_scale(axis, movement_axis)),
@@ -64,16 +87,19 @@ static vec3s move(AABB aabb, vec3s movement, AABB *colliders, size_t size) {
 }
 
 // creates an AABB of the phyics component's size centered around its position
-// Resolve collision against a single collider: push back along axis,
-// update moved/aabb, and return true if movement was effectively stopped.
-static bool resolve_collision(AABB *aabb, AABB *moved, const AABB *collider,
-                              vec3s *d_v, f32 m_sign, size_t axis_index) {
-    f32 depth = glms_aabb_aabb_depth(*moved, *collider).raw[axis_index];
-    d_v->raw[axis_index] += -m_sign * (depth + MOVEMENT_EPSILON);
-    glms_aabb_transform(*aabb, glms_translate_make(*d_v), *moved);
+// Resolve collision against the hit collider (ctx->colliders[ctx->hit_index]):
+// push back along axis, update moved/aabb, return true if displacement
+// falls below epsilon so scan_colliders can stop iterating.
+static bool resolve_collision(CollisionCtx *ctx) {
+    const AABB *collider = &ctx->colliders[ctx->hit_index];
+    f32 depth = glms_aabb_aabb_depth(ctx->moved, *collider).raw[ctx->axis_index];
+    ctx->disp += -ctx->sign * (depth + MOVEMENT_EPSILON);
 
-    if (fabsf(d_v->raw[axis_index]) <= MOVEMENT_EPSILON) {
-        d_v->raw[axis_index] = 0.0f;
+    vec3s d_v = glms_vec3_scale(ctx->axis, ctx->disp);
+    glms_aabb_transform(ctx->origin, glms_translate_make(d_v), ctx->moved);
+
+    if (fabsf(ctx->disp) <= MOVEMENT_EPSILON) {
+        ctx->disp = 0.0f;
         return true;
     }
     return false;
