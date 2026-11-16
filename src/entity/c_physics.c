@@ -60,7 +60,7 @@ static vec3s move(AABB aabb, vec3s movement, AABB *colliders, size_t size) {
     return result;
 }
 
-// creates an AABB of the phyics component's size centered around its position
+// Creates an AABB of the physics component's size centered around its position.
 static void make_aabb(
     struct PhysicsComponent *c_physics,
     struct PositionComponent *c_position,
@@ -87,7 +87,7 @@ static void tick(struct PhysicsComponent *c_physics, struct Entity entity) {
 
     // zero velocity on axes which did not move completely
     for (size_t i = 0; i < 3; i++) {
-        bool stopped = fabsf(moved.raw[i] - c_physics->velocity.raw[i]) >= F32_EPSILON;
+        const bool stopped = fabsf(moved.raw[i] - c_physics->velocity.raw[i]) >= F32_EPSILON;
         c_physics->stopped.raw[i] = stopped;
         c_physics->velocity.raw[i] *= stopped ? 0.0f : 1.0f; 
     }
@@ -121,7 +121,7 @@ vec3s physics_move(
         return movement;
     }
 
-    // ensure AABB is updated    
+    // ensure AABB is updated
     make_aabb(c_physics, c_position, c_physics->aabb);
 
     // get AABBs in a scaled area
