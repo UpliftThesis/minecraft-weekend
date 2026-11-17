@@ -346,92 +346,109 @@ static void _compute_column(struct Heightmap *heightmap, s64 x, s64 z,
     };
 }
 
+/* Process noise columns and populate the heightmap. */
+static void _process_noise_columns(struct Chunk *chunk, struct Heightmap *heightmap,
+                                   const struct Noise *n_h, const struct Noise *n_m,
+                                   const struct Noise *n_t, const struct Noise *n_r,
+                                   const struct Noise *n_n, const struct Noise *n_p)
+{
+    for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
+        for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
+            s64 wx = chunk->position.x + x, wz = chunk->position.z + z;
+            _compute_column(heightmap, x, z, wx, wz, chunk->world->seed,
+                            n_h, n_m, n_t, n_r, n_n, n_p);
+        }
+    }
+}
+
+/* Apply a 3×3 averaging pass to the heightmap h_b field. */
+static void _smooth_heightmap(struct Heightmap *heightmap)
+{
+#define WG_GET_H(_x, _z) \
+    heightmap->worldgen_data[ \
+        clamp((_x), 0, CHUNK_SIZE.x - 1) * CHUNK_SIZE.x + \
+        clamp((_z), 0, CHUNK_SIZE.z - 1)]
+
+    for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
+        for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
+            f32 v = 0.0f;
+            v += (WG_GET_H(x - 1, z - 1)).h_b;
+            v += (WG_GET_H(x + 1, z - 1)).h_b;
+            v += (WG_GET_H(x - 1, z + 1)).h_b;
+            v += (WG_GET_H(x + 1, z + 1)).h_b;
+            v *= 0.25f;
+            WG_GET_H(x, z).h = v;
+        }
+    }
+#undef WG_GET_H
+}
+
+/* Process one column of surface blocks and decorations. */
+static void _process_column_surface(struct Chunk *chunk,
+                                    s64 x, s64 z, f32 base_y, f32 h,
+                                    enum BlockId top_block,
+                                    enum BlockId under_block,
+                                    const struct BiomeData *biome_data)
+{
+    for (s64 y = 0; y < CHUNK_SIZE.y; y++) {
+        s64 y_w = base_y + y;
+
+        if (!_place_block(chunk, x, y, z, y_w, h, top_block, under_block)) {
+            continue;
+        }
+        if (y_w == h) {
+            _run_decorations(chunk, biome_data->decorations, _get, _set, x, y, z);
+        }
+    }
+}
+
+/* Build surface blocks for a single column using pre-computed heightmap data. */
+static void _place_surface_chunk(struct Chunk *chunk, struct Heightmap *heightmap,
+                                 f32 snowline)
+{
+    for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
+        for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
+            struct WorldgenData data = heightmap->worldgen_data[x * CHUNK_SIZE.x + z];
+            s64 h = data.h;
+            enum Biome biome = (enum Biome)data.b;
+            struct BiomeData biome_data = BIOME_DATA[biome];
+
+            enum BlockId top_block = h > snowline ? SNOW : biome_data.top_block;
+            enum BlockId under_block = biome_data.bottom_block;
+
+            _process_column_surface(chunk, x, z, (f32)chunk->position.y,
+                                    (f32)h, top_block, under_block, &biome_data);
+        }
+    }
+}
+
 void worldgen_generate(struct Chunk *chunk) {
     SRAND(chunk->world->seed + ivec3shash(chunk->offset));
 
     struct Heightmap *heightmap = chunk_get_heightmap(chunk);
 
-    // generate worldgen data if it doesn't exist for this chunk column yet
     if (!heightmap->flags.generated) {
         heightmap->flags.generated = true;
 
-        struct Noise bs[] = {
-            basic(1), basic(2),
-            basic(3), basic(4)
-        };
+        struct Noise bs[] = { basic(1), basic(2), basic(3), basic(4) };
+        struct Noise os[] = { octave(5, 0), octave(5, 1), octave(5, 2),
+                              octave(5, 3), octave(5, 4), octave(5, 5) };
 
-        struct Noise os[] = {
-            octave(5, 0), octave(5, 1),
-            octave(5, 2), octave(5, 3),
-            octave(5, 4), octave(5, 5),
-        };
+        struct Noise cs[] = { combined(&bs[0], &bs[1]), combined(&bs[2], &bs[3]),
+                              combined(&os[3], &os[4]), combined(&os[1], &os[2]),
+                              combined(&os[1], &os[3]) };
 
-        struct Noise cs[] = {
-            combined(&bs[0], &bs[1]),
-            combined(&bs[2], &bs[3]),
-            combined(&os[3], &os[4]),
-            combined(&os[1], &os[2]),
-            combined(&os[1], &os[3])
-        };
+        struct Noise n_h = expscale(&os[0], 1.3f, 1.0f / 128.0f);
+        struct Noise n_m = expscale(&cs[0], 1.0f, 1.0f / 512.0f);
+        struct Noise n_t = expscale(&cs[1], 1.0f, 1.0f / 512.0f);
+        struct Noise n_r = expscale(&cs[2], 1.0f, 1.0f / 16.0f);
+        struct Noise n_n = expscale(&cs[3], 3.0f, 1.0f / 512.0f);
+        struct Noise n_p = expscale(&cs[4], 3.0f, 1.0f / 512.0f);
 
-        struct Noise
-            n_h = expscale(&os[0], 1.3f, 1.0f / 128.0f),
-            n_m = expscale(&cs[0], 1.0f, 1.0f / 512.0f),
-            n_t = expscale(&cs[1], 1.0f, 1.0f / 512.0f),
-            n_r = expscale(&cs[2], 1.0f, 1.0f / 16.0f),
-            n_n = expscale(&cs[3], 3.0f, 1.0f / 512.0f),
-            n_p = expscale(&cs[4], 3.0f, 1.0f / 512.0f);
-
-        for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
-            for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
-                s64 wx = chunk->position.x + x, wz = chunk->position.z + z;
-
-                _compute_column(heightmap, x, z, wx, wz, chunk->world->seed,
-                                &n_h, &n_m, &n_t, &n_r, &n_n, &n_p);
-            }
-        }
-
-#define WG_GET_H(_x, _z)\
-    heightmap->worldgen_data[\
-        clamp((_x), 0, CHUNK_SIZE.x - 1) * CHUNK_SIZE.x +\
-        clamp((_z), 0, CHUNK_SIZE.z - 1)]
-
-        // smooth heightmap
-        for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
-            for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
-                f32 v = 0.0f;
-                v += (WG_GET_H(x - 1, z - 1)).h_b;
-                v += (WG_GET_H(x + 1, z - 1)).h_b;
-                v += (WG_GET_H(x - 1, z + 1)).h_b;
-                v += (WG_GET_H(x + 1, z + 1)).h_b;
-                v *= 0.25f;
-                WG_GET_H(x, z).h = v;
-            }
-        }
+        _process_noise_columns(chunk, heightmap,
+                               &n_h, &n_m, &n_t, &n_r, &n_n, &n_p);
+        _smooth_heightmap(heightmap);
     }
 
-    for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
-        for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
-            struct WorldgenData data = heightmap->worldgen_data[x * CHUNK_SIZE.x + z];
-            s64 h = data.h;
-            enum Biome biome = data.b;
-            struct BiomeData biome_data = BIOME_DATA[biome]; 
-
-            enum BlockId top_block = h > 48 ? SNOW : biome_data.top_block,
-                under_block = biome_data.bottom_block;
-
-            for (s64 y = 0; y < CHUNK_SIZE.y; y++) {
-                s64 y_w = chunk->position.y + y;
-
-                if (!_place_block(chunk, x, y, z, y_w, h,
-                                  top_block, under_block)) {
-                    continue;
-                }
-
-                if (y_w == h) {
-                    _run_decorations(chunk, biome_data.decorations, _get, _set, x, y, z);
-                }
-            }
-        }
-    }
+    _place_surface_chunk(chunk, heightmap, WATER_LEVEL + 48.0f);
 }
