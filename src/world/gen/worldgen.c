@@ -209,35 +209,43 @@ const f32 MOISTURE_MAP[] = {
     0.7f
 };
 
-// h = height, [-1, 1]
-// m = moisture, [0, 1]
-// t = temperature [0, 1]
-// i = mountain noise [0, 1]
-// i = modified heightmap noise [0, 1]
-static enum Biome get_biome(f32 h, f32 m, f32 t, f32 n, f32 i) {
-    if (h <= 0.0f || n <= 0.0f) {
+// h = height, [-1, 1]  m = moisture [0,1]  t = temperature [0,1]
+// n = mountain noise [0,1]  i = modified heightmap [0,1]
+typedef struct {
+    f32 height;     // h
+    f32 moisture;   // m
+    f32 temperature;// t
+    f32 mountain;   // n
+    f32 peak;       // i
+} BiomeQuery;
+
+static size_t _lookup_heat(f32 t) {
+    for (size_t i = 0; i < 4; i++) {
+        if (t <= HEAT_MAP[i]) return i;
+    }
+    return 4;
+}
+
+static size_t _lookup_moisture(f32 m) {
+    for (size_t i = 0; i < 4; i++) {
+        if (m <= MOISTURE_MAP[i]) return i;
+    }
+    return 4;
+}
+
+static enum Biome get_biome(BiomeQuery q) {
+    if (q.height <= 0.0f || q.mountain <= 0.0f) {
         return OCEAN;
-    } else if (h <= 0.005f) {
+    } else if (q.height <= 0.005f) {
         return BEACH;
     }
-    
-    if (n >= 0.1f && i >= 0.2f) {
+
+    if (q.mountain >= 0.1f && q.peak >= 0.2f) {
         return MOUNTAIN;
     }
 
-    size_t t_i = 0, m_i = 0;
-
-    for (; t_i < 4; t_i++) {
-        if (t <= HEAT_MAP[t_i]) {
-            break;
-        }
-    }
-
-    for (; m_i < 4; m_i++) {
-        if (m <= MOISTURE_MAP[m_i]) {
-            break;
-        }
-    }
+    size_t t_i = _lookup_heat(q.temperature);
+    size_t m_i = _lookup_moisture(q.moisture);
 
     return BIOME_TABLE[m_i][t_i];
 }
@@ -265,6 +273,78 @@ static void _set(struct Chunk *chunk, s32 x, s32 y, s32 z, u32 d) {
     }
 }
 
+
+/* Apply registered decorations to a surface position. */
+static void _run_decorations(struct Chunk *chunk,
+                             const struct Decoration decorations[],
+                             FWGGet get, FWGSet set, s64 x, s64 y, s64 z)
+{
+    for (size_t i = 0; i < MAX_DECORATIONS; i++) {
+        if (decorations[i].f == NULL) {
+            break;
+        }
+        if (RANDCHANCE(decorations[i].chance)) {
+            decorations[i].f(chunk, get, set, x, y, z);
+        }
+    }
+}
+
+/* Place the appropriate block at (x,y,z) based on world Y and terrain
+ * height.  Returns false to signal "skip this layer". */
+static bool _place_block(struct Chunk *chunk, s32 x, s32 y, s32 z,
+                         f32 y_w, f32 h,
+                         enum BlockId top_block, enum BlockId under_block)
+{
+    if (y_w > h && y_w <= WATER_LEVEL) {
+        chunk_set_block(chunk, (ivec3s){{x, y, z}}, WATER);
+        return true;
+    }
+    if (y_w > h) {
+        return false;
+    }
+    if (y_w == h) {
+        chunk_set_block(chunk, (ivec3s){{x, y, z}}, top_block);
+        return true;
+    }
+    if (y_w >= h - 3) {
+        chunk_set_block(chunk, (ivec3s){{x, y, z}}, under_block);
+        return true;
+    }
+    chunk_set_block(chunk, (ivec3s){{x, y, z}}, STONE);
+    return true;
+}
+
+/* Compute noise values for a single (x,z) column and store WorldgenData. */
+static void _compute_column(struct Heightmap *heightmap, s64 x, s64 z,
+                            s64 wx, s64 wz, u64 seed,
+                            const struct Noise *n_h, const struct Noise *n_m,
+                            const struct Noise *n_t, const struct Noise *n_r,
+                            const struct Noise *n_n, const struct Noise *n_p)
+{
+    f32 h = n_h->compute(&n_h->params, seed, wx, wz),
+        m = n_m->compute(&n_m->params, seed, wx, wz) * 0.5f + 0.5f,
+        t = n_t->compute(&n_t->params, seed, wx, wz) * 0.5f + 0.5f,
+        r = n_r->compute(&n_r->params, seed, wx, wz),
+        n = n_n->compute(&n_n->params, seed, wx, wz),
+        p = n_p->compute(&n_p->params, seed, wx, wz);
+
+    // add 'peak' noise to mountain noise
+    n += safe_expf(p, (1.0f - n) * 3.0f);
+
+    // decrease temperature with height
+    t -= 0.4f * n;
+    t = clamp(t, 0.0f, 1.0f);
+
+    enum Biome biome_id = get_biome((BiomeQuery){ h, m, t, n, n + h });
+    struct BiomeData biome = BIOME_DATA[biome_id];
+
+    h = sign(h) * fabsf(powf(fabsf(h), biome.exp));
+
+    heightmap->worldgen_data[x * CHUNK_SIZE.x + z] = (struct WorldgenData) {
+        .h_b = ((h * 32.0f) + (n * 256.0f)) * biome.scale + (biome.roughness * r * 2.0f),
+        .b = biome_id
+    };
+}
 
 void worldgen_generate(struct Chunk *chunk) {
     SRAND(chunk->world->seed + ivec3shash(chunk->offset));
@@ -306,32 +386,8 @@ void worldgen_generate(struct Chunk *chunk) {
             for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
                 s64 wx = chunk->position.x + x, wz = chunk->position.z + z;
 
-                f32 h = n_h.compute(&n_h.params, chunk->world->seed, wx, wz),
-                    m = n_m.compute(&n_m.params, chunk->world->seed, wx, wz) * 0.5f + 0.5f,
-                    t = n_t.compute(&n_t.params, chunk->world->seed, wx, wz) * 0.5f + 0.5f,
-                    r = n_r.compute(&n_r.params, chunk->world->seed, wx, wz),
-                    n = n_n.compute(&n_n.params, chunk->world->seed, wx, wz),
-                    p = n_p.compute(&n_p.params, chunk->world->seed, wx, wz);
-
-                // add 'peak' noise to mountain noise
-                n += safe_expf(p, (1.0f - n) * 3.0f);
-
-                // decrease moisture with distance from ocean
-                // m += 0.05f * n;
-                
-                // decrease temperature with height
-                t -= 0.4f * n;
-                t = clamp(t, 0.0f, 1.0f);
-
-                enum Biome biome_id = get_biome(h, m, t, n, n + h);
-                struct BiomeData biome = BIOME_DATA[biome_id];
-
-                h = sign(h) * fabsf(powf(fabsf(h), biome.exp));
-
-                heightmap->worldgen_data[x * CHUNK_SIZE.x + z] = (struct WorldgenData) {
-                    .h_b = ((h * 32.0f) + (n * 256.0f)) * biome.scale + (biome.roughness * r * 2.0f),
-                    .b = biome_id
-                };
+                _compute_column(heightmap, x, z, wx, wz, chunk->world->seed,
+                                &n_h, &n_m, &n_t, &n_r, &n_n, &n_p);
             }
         }
 
@@ -367,33 +423,13 @@ void worldgen_generate(struct Chunk *chunk) {
             for (s64 y = 0; y < CHUNK_SIZE.y; y++) {
                 s64 y_w = chunk->position.y + y;
 
-                enum BlockId block = AIR;
-
-                if (y_w > h && y_w <= WATER_LEVEL) {
-                    block = WATER;
-                } else if (y_w > h) {
+                if (!_place_block(chunk, x, y, z, y_w, h,
+                                  top_block, under_block)) {
                     continue;
-                } else if (y_w == h) {
-                    block = top_block;
-                } else if (y_w >= (h - 3)) {
-                    block = under_block;
-                } else {
-                    block = STONE;
                 }
 
-                chunk_set_block(chunk, (ivec3s) {{ x, y, z }}, block);
-
                 if (y_w == h) {
-                    // decorate
-                    for (size_t i = 0; i < MAX_DECORATIONS; i++) {
-                        if (biome_data.decorations[i].f == NULL) {
-                            break;
-                        }
-
-                        if (RANDCHANCE(biome_data.decorations[i].chance)) {
-                            biome_data.decorations[i].f(chunk, _get, _set, x, y, z);
-                        }
-                    }
+                    _run_decorations(chunk, biome_data.decorations, _get, _set, x, y, z);
                 }
             }
         }
