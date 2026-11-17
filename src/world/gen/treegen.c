@@ -1,6 +1,10 @@
 #include "worldgen.h"
 #include "../world.h"
 
+static inline bool is_on_edge(s32 pos, s32 centre, s32 range) {
+    return pos == (centre - range) || pos == (centre + range);
+}
+
 void worldgen_tree(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s64 z) {
     enum BlockId under = get(chunk, x, y, z);
     if (under != GRASS && under != DIRT) {
@@ -15,13 +19,14 @@ void worldgen_tree(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s6
 
     s32 lh = RAND(2, 3);
 
+    /* Lower canopy — 5×5 ring around trunk */
     for (s32 xx = (x - 2); xx <= (x + 2); xx++) {
         for (s32 zz = (z - 2); zz <= (z + 2); zz++) {
             for (s32 yy = (y + h); yy <= (y + h + 1); yy++) {
-                s32 c = 0;
-                c += xx == (x - 2) || xx == (x + 2);
-                c += zz == (z - 2) || zz == (z + 2);
-                bool corner = c == 2;
+                if (!(is_on_edge(xx, x, 2))) continue;
+                if (!(is_on_edge(zz, z, 2))) continue;
+
+                bool corner = true;  /* both x and z are on edges */
 
                 if ((!(xx == x && zz == z) || yy > (y + h)) &&
                     !(corner && yy == (y + h + 1) && RANDCHANCE(0.4))) {
@@ -31,13 +36,14 @@ void worldgen_tree(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s6
         }
     }
 
+    /* Upper canopy — 3×3 ring */
     for (s32 xx = (x - 1); xx <= (x + 1); xx++) {
         for (s32 zz = (z - 1); zz <= (z + 1); zz++) {
             for (s32 yy = (y + h + 2); yy <= (y + h + lh); yy++) {
-                s32 c = 0;
-                c += xx == (x - 1) || xx == (x + 1);
-                c += zz == (z - 1) || zz == (z + 1);
-                bool corner = c == 2;
+                if (!(is_on_edge(xx, x, 1))) continue;
+                if (!(is_on_edge(zz, z, 1))) continue;
+
+                bool corner = true;  /* both x and z are on edges */
 
                 if (!(corner && yy == (y + h + lh) && RANDCHANCE(0.8))) {
                     set(chunk, xx, yy, zz, LEAVES);
