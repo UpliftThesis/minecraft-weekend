@@ -1,8 +1,43 @@
 #include "worldgen.h"
 #include "../world.h"
 
-static inline bool is_on_edge(s32 pos, s32 centre, s32 range) {
-    return pos == (centre - range) || pos == (centre + range);
+/* Place the lower canopy leaf ring (5×5 × 2 layers). */
+static void place_lower_canopy(struct Chunk *chunk, FWGSet set,
+                               s32 cx, s32 cz, s32 trunk_top) {
+    for (s32 xx = cx - 2; xx <= cx + 2; xx++) {
+        for (s32 zz = cz - 2; zz <= cz + 2; zz++) {
+            for (s32 yy = trunk_top; yy <= trunk_top + 1; yy++) {
+                s32 c = 0;
+                c += xx == (cx - 2) || xx == (cx + 2);
+                c += zz == (cz - 2) || zz == (cz + 2);
+                bool corner = c == 2;
+
+                if ((!(xx == cx && zz == cz) || yy > trunk_top) &&
+                    !(corner && yy == (trunk_top + 1) && RANDCHANCE(0.4))) {
+                    set(chunk, xx, yy, zz, LEAVES);
+                }
+            }
+        }
+    }
+}
+
+/* Place the upper canopy leaf ring (3×3 × N layers). */
+static void place_upper_canopy(struct Chunk *chunk, FWGSet set,
+                               s32 cx, s32 cz, s32 trunk_top, s32 lh) {
+    for (s32 xx = cx - 1; xx <= cx + 1; xx++) {
+        for (s32 zz = cz - 1; zz <= cz + 1; zz++) {
+            for (s32 yy = (trunk_top + 2); yy <= (trunk_top + lh); yy++) {
+                s32 c = 0;
+                c += xx == (cx - 1) || xx == (cx + 1);
+                c += zz == (cz - 1) || zz == (cz + 1);
+                bool corner = c == 2;
+
+                if (!(corner && yy == (trunk_top + lh) && RANDCHANCE(0.8))) {
+                    set(chunk, xx, yy, zz, LEAVES);
+                }
+            }
+        }
+    }
 }
 
 void worldgen_tree(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s64 z) {
@@ -19,38 +54,8 @@ void worldgen_tree(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s6
 
     s32 lh = RAND(2, 3);
 
-    /* Lower canopy — 5×5 ring around trunk */
-    for (s32 xx = (x - 2); xx <= (x + 2); xx++) {
-        for (s32 zz = (z - 2); zz <= (z + 2); zz++) {
-            for (s32 yy = (y + h); yy <= (y + h + 1); yy++) {
-                if (!(is_on_edge(xx, x, 2))) continue;
-                if (!(is_on_edge(zz, z, 2))) continue;
-
-                bool corner = true;  /* both x and z are on edges */
-
-                if ((!(xx == x && zz == z) || yy > (y + h)) &&
-                    !(corner && yy == (y + h + 1) && RANDCHANCE(0.4))) {
-                    set(chunk, xx, yy, zz, LEAVES);
-                }
-            }
-        }
-    }
-
-    /* Upper canopy — 3×3 ring */
-    for (s32 xx = (x - 1); xx <= (x + 1); xx++) {
-        for (s32 zz = (z - 1); zz <= (z + 1); zz++) {
-            for (s32 yy = (y + h + 2); yy <= (y + h + lh); yy++) {
-                if (!(is_on_edge(xx, x, 1))) continue;
-                if (!(is_on_edge(zz, z, 1))) continue;
-
-                bool corner = true;  /* both x and z are on edges */
-
-                if (!(corner && yy == (y + h + lh) && RANDCHANCE(0.8))) {
-                    set(chunk, xx, yy, zz, LEAVES);
-                }
-            }
-        }
-    }
+    place_lower_canopy(chunk, set, (s32)x, (s32)z, (s32)y + h);
+    place_upper_canopy(chunk, set, (s32)x, (s32)z, (s32)y + h, lh);
 }
 
 void worldgen_pine(struct Chunk *chunk, FWGGet get, FWGSet set, s64 x, s64 y, s64 z) {
