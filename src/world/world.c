@@ -292,6 +292,37 @@ void world_remove_unloaded_block(struct World *self, size_t i) {
     }
 }
 
+// Move previously-loaded chunks from a backup into the new array;
+// free chunks that are out of bounds for the re-centred world.
+static void place_old_chunks(struct World *w, struct Chunk **old, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        struct Chunk *c = old[i];
+        if (c == NULL) continue;
+        else if (world_chunk_in_bounds(w, c->offset))
+            w->chunks[world_chunk_index(w, c->offset)] = c;
+        else {
+            chunk_destroy(c);
+            free(c);
+        }
+    }
+}
+
+// Move previously-loaded heightmaps from a backup into the new array;
+// free heightmaps whose column is out of bounds now.
+static void place_old_heightmaps(struct World *w, struct Heightmap **old, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        struct Heightmap *h = old[i];
+        if (h == NULL) continue;
+        else if (world_heightmap_in_bounds(w, h->offset))
+            w->heightmaps[world_heightmap_index(w, h->offset)] = h;
+        else {
+            free(h->worldgen_data);
+            free(h->data);
+            free(h);
+        }
+    }
+}
+
 // Attempt to load any NULL chunks
 static void load_empty_chunks(struct World *self) {
     world_foreach_offset_ftb(self, i, offset) {
@@ -328,36 +359,15 @@ void world_set_center(struct World *self, ivec3s center_pos) {
     // Set world to all unloaded chunks initially
     memset(self->chunks, 0, NUM_CHUNKS(self) * sizeof(struct Chunk *));
 
-    // Place old chunks in positions of new chunk array, destroy if they are out of bounds now
-    for (size_t i = 0; i < NUM_CHUNKS(self); i++) {
-        struct Chunk *c = old[i];
-        if (c == NULL) {
-            continue;
-        } else if (world_chunk_in_bounds(self, c->offset)) {
-            self->chunks[world_chunk_index(self, c->offset)] = c;
-        } else {
-            chunk_destroy(c);
-            free(c);
-        }
-    }
+    // Place old chunks in positions of new chunk array, destroy if out of bounds
+    place_old_chunks(self, old, NUM_CHUNKS(self));
 
     // Move heightmaps
     struct Heightmap *old_heightmaps[NUM_HEIGHTMAPS(self)];
     memcpy(old_heightmaps, self->heightmaps, NUM_HEIGHTMAPS(self) * sizeof(struct Heightmap *));
     memset(self->heightmaps, 0, NUM_HEIGHTMAPS(self) * sizeof(struct Heightmap *));
 
-    for (size_t i = 0; i < NUM_HEIGHTMAPS(self); i++) {
-        struct Heightmap *h = old_heightmaps[i];
-        if (h == NULL) {
-            continue;
-        } else if (world_heightmap_in_bounds(self, h->offset)) {
-            self->heightmaps[world_heightmap_index(self, h->offset)] = h;
-        } else {
-            free(h->worldgen_data);
-            free(h->data);
-            free(h);
-        }
-    }
+    place_old_heightmaps(self, old_heightmaps, NUM_HEIGHTMAPS(self));
 
     // Create empty heightmaps
     for (size_t i = 0; i < NUM_HEIGHTMAPS(self); i++) {
