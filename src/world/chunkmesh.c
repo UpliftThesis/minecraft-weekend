@@ -194,6 +194,20 @@ static void chunkmesh_sort(struct ChunkMesh *self, enum SortKind kind) {
     free(t_indices.data);
 }
 
+static inline bool face_is_visible(
+    const struct Block *block,
+    const struct Block *block_n)
+{
+    if (block->mesh_type == BLOCKMESH_CUSTOM)
+        return true;
+    if (!block->transparent && block_n->transparent)
+        return true;
+    if (block->transparent && block_n->transparent &&
+        block_n->id != block->id)
+        return true;
+    return false;
+}
+
 static void chunkmesh_mesh(struct ChunkMesh *self) {
     struct Chunk *chunk = self->chunk;
     struct BlockAtlas *block_atlas = &state.renderer.block_atlas;
@@ -232,11 +246,7 @@ static void chunkmesh_mesh(struct ChunkMesh *self) {
                         params.data_n = CHUNK_WORLD_GET_DATA(chunk, n);
                         params.block_n = &BLOCKS[chunk_data_to_block(params.data_n)];
 
-                        if (params.block->mesh_type == BLOCKMESH_CUSTOM ||
-                            (params.block_n->transparent && !params.block->transparent) ||
-                            (params.block->transparent &&
-                                params.block_n->transparent &&
-                                params.block_n->id != params.block->id)) {
+                        if (face_is_visible(params.block, params.block_n)) {
                             params.direction = d;
 
                             // get base UV coordinates
