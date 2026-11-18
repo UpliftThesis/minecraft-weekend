@@ -154,15 +154,24 @@ bool world_heightmap_update(struct World *self, ivec3s p) {
     return false;
 }
 
+// Find the highest non-transparent block in one chunk column (x, z).
+// Returns its local-y coordinate, or -1 when no such block exists.
+static s64 column_highest_solid_y(const struct Chunk *chunk, s64 x, s64 z) {
+    for (s64 y = CHUNK_SIZE.y - 1; y >= 0; y--) {
+        ivec3s p = {(s32)x, (s32)y, (s32)z};
+        if (!BLOCKS[chunk_get_block(chunk, p)].transparent)
+            return y;
+    }
+    return -1;
+}
+
 // recalculate heightmap values for an entire chunk
 void chunk_heightmap_recalculate(struct Chunk *chunk) {
     struct Heightmap *heightmap = chunk_get_heightmap(chunk);
-    ivec3s pos_c, pos_w;
+    ivec3s pos_w;
 
     for (s64 x = 0; x < CHUNK_SIZE.x; x++) {
         for (s64 z = 0; z < CHUNK_SIZE.z; z++) {
-            pos_c.x = x;
-            pos_c.z = z;
             pos_w.x = x + chunk->position.x;
             pos_w.z = z + chunk->position.z;
 
@@ -173,14 +182,10 @@ void chunk_heightmap_recalculate(struct Chunk *chunk) {
                 continue;
             }
 
-            for (s64 y = CHUNK_SIZE.y - 1; y >= 0; y--) {
-                pos_c.y = y;
+            s64 y = column_highest_solid_y(chunk, x, z);
+            if (y >= 0) {
                 pos_w.y = y + chunk->position.y;
-
-                if (!BLOCKS[chunk_get_block(chunk, pos_c)].transparent) {
-                    HEIGHTMAP_SET(heightmap, ((ivec2s) {{ pos_c.x, pos_c.z }}), pos_w.y);
-                    break;
-                }
+                HEIGHTMAP_SET(heightmap, ((ivec2s) {{ x, z }}), pos_w.y);
             }
         }
     }
@@ -323,6 +328,16 @@ static void place_old_heightmaps(struct World *w, struct Heightmap **old, size_t
     }
 }
 
+// Create one empty heightmap for column index i in the re-centred world.
+static void create_empty_heightmap(struct World *w, size_t i) {
+    struct Heightmap *h = calloc(1, sizeof(struct Heightmap));
+    h->offset = world_heightmap_offset(w, i);
+    h->data = malloc(CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(s64));
+    h->worldgen_data = malloc(CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(struct WorldgenData));
+    memsetl(h->data, HEIGHTMAP_UNKNOWN, CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(s64));
+    w->heightmaps[i] = h;
+}
+
 // Attempt to load any NULL chunks
 static void load_empty_chunks(struct World *self) {
     world_foreach_offset_ftb(self, i, offset) {
@@ -369,15 +384,10 @@ void world_set_center(struct World *self, ivec3s center_pos) {
 
     place_old_heightmaps(self, old_heightmaps, NUM_HEIGHTMAPS(self));
 
-    // Create empty heightmaps
+    // Create empty heightmaps for new columns
     for (size_t i = 0; i < NUM_HEIGHTMAPS(self); i++) {
-        if (self->heightmaps[i] == NULL) {
-            self->heightmaps[i] = calloc(1, sizeof(struct Heightmap));
-            self->heightmaps[i]->offset = world_heightmap_offset(self, i);
-            self->heightmaps[i]->data = malloc(CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(s64));
-            self->heightmaps[i]->worldgen_data = malloc(CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(struct WorldgenData));
-            memsetl(self->heightmaps[i]->data, HEIGHTMAP_UNKNOWN, CHUNK_SIZE.x * CHUNK_SIZE.z * sizeof(s64));
-        }
+        if (self->heightmaps[i] == NULL)
+            create_empty_heightmap(self, i);
     }
 
     load_empty_chunks(self);
