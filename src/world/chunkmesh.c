@@ -118,8 +118,50 @@ static int depth_cmp(const struct Face *a, const struct Face *b) {
     return (int) -sign(a->distance - b->distance);
 }
 
+// Copy sorted-face data back into the index buffer in sorted order,
+// tracking which original face positions were moved.
+static void remap_sorted_face_data(
+    struct ChunkMeshBuffer *faces,
+    struct ChunkMeshBuffer *indices,
+    const struct ChunkMeshBuffer *t_indices,
+    Bitmap moved)
+{
+    for (size_t i = 0; i < faces->elements; i++) {
+        struct Face *face = &((struct Face*) faces->data)[i];
+        if (face->indices_base != i * 6) {
+            memcpy(&((u32*) indices->data)[i * 6],
+                   &((u32*) t_indices->data)[face->indices_base],
+                   6 * sizeof(u32));
+        }
+        if (moved != NULL)
+            bitmap_set(moved, face->indices_base / 6);
+        face->indices_base = i * 6;
+    }
+}
+
+// Scatter unrelocated original-index faces to the tail of the index buffer
+// during a full sort, using the moved bitmap to skip already-placed faces.
+static void scatter_unrelocated(
+    const struct ChunkMeshBuffer *t_indices,
+    size_t total_faces,
+    struct ChunkMeshBuffer *indices,
+    size_t *base_offset,
+    size_t *base_count,
+    const Bitmap moved)
+{
+    for (size_t i = 0; i < total_faces; i++) {
+        if (!bitmap_get(moved, i)) {
+            void *dst = &((u32*) indices->data)[*base_offset + *base_count];
+            void *src = &((u32*) t_indices->data)[i * 6];
+            memcpy(dst, src, 6 * sizeof(u32));
+            (*base_count) += 6;
+        }
+    }
+}
+
 static void chunkmesh_sort(struct ChunkMesh *self, enum SortKind kind) {
-    vec3s center = ((struct PositionComponent *) ecs_get(self->chunk->world->entity_view, C_POSITION))->position;
+    vec3s center = ((struct PositionComponent *)
+        ecs_get(self->chunk->world->entity_view, C_POSITION))->position;
 
     struct ChunkMeshBuffer
         *faces = &self->buffers[FACES],
@@ -135,7 +177,7 @@ static void chunkmesh_sort(struct ChunkMesh *self, enum SortKind kind) {
 
     memcpy(t_indices.data, indices->data, indices->count);
 
-    // calulate face distances
+    // calculate face distances
     for (size_t i = 0; i < faces->elements; i++) {
         struct Face *face = &((struct Face*) faces->data)[i];
         face->distance = glms_vec3_norm2(glms_vec3_sub(center, face->position));
@@ -146,25 +188,10 @@ static void chunkmesh_sort(struct ChunkMesh *self, enum SortKind kind) {
         faces->data, faces->elements, sizeof(struct Face),
         (int (*)(const void*, const void*)) depth_cmp);
 
-    Bitmap moved = kind == SORT_FULL ? bitmap_calloc(indices->elements / 6) : NULL;
+    Bitmap moved = kind == SORT_FULL ?
+        bitmap_calloc(indices->elements / 6) : NULL;
 
-    // iterate over sorted faces: move them (in order) into the front of the index buffer
-    for (size_t i = 0; i < faces->elements; i++) {
-        struct Face *face = &((struct Face*) faces->data)[i];
-        if (face->indices_base != i * 6) {
-            memcpy(
-                &((u32*) indices->data)[i * 6],
-                &((u32*) t_indices.data)[face->indices_base],
-                6 * sizeof(u32)
-            );
-        }
-
-        if (moved != NULL) {
-            bitmap_set(moved, face->indices_base / 6);
-        }
-
-        face->indices_base = i * 6;
-    }
+    remap_sorted_face_data(faces, indices, &t_indices, moved);
 
     // only move non-transparent indices around on a full sort
     if (kind == SORT_FULL) {
@@ -174,17 +201,9 @@ static void chunkmesh_sort(struct ChunkMesh *self, enum SortKind kind) {
         self->indices.base.offset = self->indices.transparent.count;
         self->indices.base.count = 0;
 
-        // iterate over ALL faces, move those that weren't originally moved to the end of the index buffer
-        for (size_t i = 0; i < (indices->elements / 6); i++) {
-            if (!bitmap_get(moved, i)) {
-                memcpy(
-                    &((u32*) indices->data)[self->indices.base.offset + self->indices.base.count],
-                    &((u32*) t_indices.data)[i * 6],
-                    6 * sizeof(u32)
-                );
-                self->indices.base.count += 6;
-            }
-        }
+        scatter_unrelocated(
+            &t_indices, indices->elements / 6, indices,
+            &self->indices.base.offset, &self->indices.base.count, moved);
     }
 
     if (moved != NULL) {
@@ -200,12 +219,75 @@ static inline bool face_is_visible(
 {
     if (block->mesh_type == BLOCKMESH_CUSTOM)
         return true;
-    if (!block->transparent && block_n->transparent)
-        return true;
-    if (block->transparent && block_n->transparent &&
-        block_n->id != block->id)
-        return true;
-    return false;
+    if (block->transparent) {
+        if (!block_n->transparent)
+            return false;
+        if (block->id != block_n->id)
+            return true;
+        return false;
+    }
+    // block opaque — face visible when neighbour is transparent
+    return block_n->transparent;
+}
+
+// Resolve custom-mesh UV overrides and emit the face geometry.
+static inline void emit_face(
+    struct ChunkMesh *self,
+    struct BlockMeshParams *params,
+    struct BlockAtlas *atlas,
+    struct World *world,
+    ivec3s pos)
+{
+    if (params->block->mesh_type == BLOCKMESH_CUSTOM) {
+        ivec2s uv_offset_px, uv_size_px;
+        params->block->get_mesh_information(
+            world, pos, params->direction,
+            &params->offset, &params->size,
+            &uv_offset_px, &uv_size_px);
+
+        vec2s uv_offset = glms_vec2_mul(
+            IVEC2S2V(uv_offset_px),
+            atlas->pixel_unit),
+            uv_size = glms_vec2_mul(
+            IVEC2S2V(uv_size_px),
+            atlas->pixel_unit);
+
+        params->uv_min = glms_vec2_add(params->uv_min, uv_offset);
+        params->uv_max = glms_vec2_add(params->uv_min, uv_size);
+    }
+    blockmesh_face(self, *params);
+}
+
+// Emit visible exterior faces for a default / custom / liquid block type.
+static void emit_regular_block_faces(
+    struct ChunkMesh *self,
+    struct Chunk *chunk,
+    struct BlockMeshParams *params,
+    vec3s pos_w,
+    struct BlockAtlas *atlas,
+    ivec3s pos)
+{
+    params->offset = (vec3s) {{ 0, 0, 0 }};
+    params->size = (vec3s) {{ 1, 1, 1 }};
+
+    for (enum Direction d = 0; d < 6; d++) {
+        ivec3s d_v = DIR2IVEC3S(d);
+        ivec3s n = glms_ivec3_add(pos, d_v);
+
+        params->data_n = CHUNK_WORLD_GET_DATA(chunk, n);
+        params->block_n = &BLOCKS[chunk_data_to_block(params->data_n)];
+
+        if (face_is_visible(params->block, params->block_n)) {
+            params->direction = d;
+
+            // get base UV coordinates
+            atlas_get(atlas->atlas,
+                      params->block->get_texture_location(chunk->world, pos_w, d),
+                      &params->uv_min, &params->uv_max);
+
+            emit_face(self, params, atlas, chunk->world, pos);
+        }
+    }
 }
 
 static void chunkmesh_mesh(struct ChunkMesh *self) {
@@ -236,48 +318,8 @@ static void chunkmesh_mesh(struct ChunkMesh *self) {
                 case BLOCKMESH_CUSTOM:
                 case BLOCKMESH_DEFAULT:
                 case BLOCKMESH_LIQUID:
-                    params.offset = (vec3s) {{ 0, 0, 0 }};
-                    params.size = (vec3s) {{ 1, 1, 1 }};
-
-                    for (enum Direction d = 0; d < 6; d++) {
-                        ivec3s d_v = DIR2IVEC3S(d);
-                        ivec3s n = glms_ivec3_add(pos, d_v);
-                        
-                        params.data_n = CHUNK_WORLD_GET_DATA(chunk, n);
-                        params.block_n = &BLOCKS[chunk_data_to_block(params.data_n)];
-
-                        if (face_is_visible(params.block, params.block_n)) {
-                            params.direction = d;
-
-                            // get base UV coordinates
-                            atlas_get(
-                                block_atlas->atlas,
-                                params.block->get_texture_location(chunk->world, pos_w, d),
-                                &params.uv_min, &params.uv_max);
-
-                            // get custom mesh parameters for this face
-                            if (params.block->mesh_type == BLOCKMESH_CUSTOM) {
-                                ivec2s uv_offset_px, uv_size_px;
-                                params.block->get_mesh_information(
-                                    chunk->world, pos, params.direction,
-                                    &params.offset, &params.size,
-                                    &uv_offset_px, &uv_size_px);
-
-                                // offset UV coordinates
-                                vec2s uv_offset = glms_vec2_mul(
-                                    IVEC2S2V(uv_offset_px),
-                                    block_atlas->atlas.pixel_unit),
-                                    uv_size = glms_vec2_mul(
-                                    IVEC2S2V(uv_size_px),
-                                    block_atlas->atlas.pixel_unit);
-
-                                params.uv_min = glms_vec2_add(params.uv_min, uv_offset);
-                                params.uv_max = glms_vec2_add(params.uv_min, uv_size);
-                            }
-
-                            blockmesh_face(self, params);
-                        }
-                    }
+                    emit_regular_block_faces(self, chunk, &params, pos_w,
+                                             block_atlas, pos);
                     break;
             }
         }
@@ -289,35 +331,76 @@ static void chunkmesh_mesh(struct ChunkMesh *self) {
     chunkmesh_finalize_indices(self);
 }
 
+// Full mesh pipeline + flag clearing + throttle accounting.
+static void rebuild_and_upload(struct ChunkMesh *self) {
+    chunkmesh_mesh(self);
+    self->flags.dirty = false;
+    self->flags.depth_sort = false;
+    self->chunk->world->throttles.mesh.count++;
+}
+
+// True when partial-sort buffers exist and are retained.
+static inline bool can_partial_sort(const struct ChunkMesh *self) {
+    if (!self->flags.persist)
+        return false;
+    if (self->buffers[INDICES].data == NULL)
+        return false;
+    if (self->buffers[FACES].data == NULL)
+        return false;
+    return true;
+}
+
+// Depth-sort (partial when buffers persist, otherwise full re-mesh) + flag
+// clearing + throttle accounting.
+static void perform_depth_sort_or_rebuild(struct ChunkMesh *self) {
+    if (can_partial_sort(self)) {
+        chunkmesh_sort(self, SORT_PARTIAL);
+        chunkmesh_finalize_indices(self);
+    } else {
+        chunkmesh_mesh(self);
+    }
+    self->flags.depth_sort = false;
+    self->chunk->world->throttles.mesh.count++;
+}
+
 void chunkmesh_prepare_render(struct ChunkMesh *self) {
-    if (self->chunk->world->throttles.mesh.count <
-        self->chunk->world->throttles.mesh.max) {
-        if (self->flags.dirty) {
-            chunkmesh_mesh(self);
-            self->flags.dirty = false;
-            self->flags.depth_sort = false;
-            self->chunk->world->throttles.mesh.count++;
-        } else if (self->flags.depth_sort) {
-            if (self->flags.persist &&
-                self->buffers[INDICES].data != NULL &&
-                self->buffers[FACES].data != NULL) {
-                chunkmesh_sort(self, SORT_PARTIAL);
-                chunkmesh_finalize_indices(self);
-            } else {
-                chunkmesh_mesh(self);
-            }
-            self->flags.depth_sort = false;
-            self->chunk->world->throttles.mesh.count++;
-        }
+    if (self->chunk->world->throttles.mesh.count >=
+        self->chunk->world->throttles.mesh.max)
+        return;
+
+    if (self->flags.dirty) {
+        rebuild_and_upload(self);
+    } else if (self->flags.depth_sort) {
+        perform_depth_sort_or_rebuild(self);
+    }
+}
+
+// Return true when the requested draw pass has no indices.
+static inline bool mesh_part_empty(const struct ChunkMesh *self,
+                                    enum ChunkMeshPart part)
+{
+    if (part == TRANSPARENT)
+        return self->indices.transparent.count == 0;
+    return self->indices.base.count == 0;
+}
+
+// Resolve per-part offset and count into out parameters.
+static inline void get_mesh_indices(const struct ChunkMesh *self,
+                                     enum ChunkMeshPart part,
+                                     size_t *offset, size_t *count)
+{
+    if (part == TRANSPARENT) {
+        *offset = self->indices.transparent.offset;
+        *count = self->indices.transparent.count;
+    } else {
+        *offset = self->indices.base.offset;
+        *count = self->indices.base.count;
     }
 }
 
 void chunkmesh_render(struct ChunkMesh *self, enum ChunkMeshPart part) {
-    // don't attempt to render empty meshes
-    if ((part == TRANSPARENT && self->indices.transparent.count == 0) ||
-        (part == BASE && self->indices.base.count == 0)) {
+    if (mesh_part_empty(self, part))
         return;
-    }
 
     shader_uniform_mat4(
         state.renderer.shaders[SHADER_CHUNK], "m",
@@ -332,13 +415,7 @@ void chunkmesh_render(struct ChunkMesh *self, enum ChunkMeshPart part) {
     vbo_bind(self->ibo);
 
     size_t offset, count;
-    if (part == TRANSPARENT) {
-        offset = self->indices.transparent.offset;
-        count = self->indices.transparent.count;
-    } else {
-        offset = self->indices.base.offset;
-        count = self->indices.base.count;
-    }
+    get_mesh_indices(self, part, &offset, &count);
 
     glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void *) (offset * sizeof(u32)));
 }
