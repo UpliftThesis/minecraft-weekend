@@ -474,6 +474,22 @@ void world_tick(struct World *self) {
     ecs_event(&self->ecs, ECS_TICK);
 }
 
+// Process one block: if solid, write its AABB, advance counter, print warning
+// if capacity reached. Leaves all outer loops untouched so the original
+// overflow-writing behaviour (the known defect) is preserved.
+static void process_one_aabb(struct World *self, ivec3s pos, AABB *aabbs,
+                             size_t *count, size_t capacity) {
+    struct Block block = BLOCKS[world_get_block(self, pos)];
+    if (!block.solid) return;
+
+    block.get_aabb(self, pos, aabbs[*count]);
+    (*count)++;
+
+    if (*count == capacity) {
+        printf("%s", "WARNING: AABB buffer filled\n");
+    }
+}
+
 // returns all AABBs within the specified area
 size_t world_get_aabbs(struct World *self, AABB area, AABB *aabbs, size_t n) {
     ivec3s b_min = world_pos_to_block(area[0]),
@@ -483,18 +499,7 @@ size_t world_get_aabbs(struct World *self, AABB area, AABB *aabbs, size_t n) {
     for (s64 x = b_min.x; x <= b_max.x; x++) {
         for (s64 z = b_min.z; z <= b_max.z; z++) {
             for (s64 y = b_min.y; y <= b_max.y; y++) {
-                ivec3s pos = (ivec3s) {{ x, y, z }};
-                struct Block block = BLOCKS[world_get_block(self, pos)];
-                
-                if (block.solid) {
-                    block.get_aabb(self, pos, aabbs[i++]);
-
-                    if (i == n) {
-                        // TODO: real warning here?
-                        printf("%s", "WARNING: AABB buffer filled\n");
-                        break;
-                    }
-                }
+                process_one_aabb(self, (ivec3s) {{ x, y, z }}, aabbs, &i, n);
             }
         }
     }
