@@ -95,6 +95,24 @@ static void handle_side_sunlight(
     ENQUEUE(queue, ((struct LightNode){.pos=n_pos}));
 }
 
+// Handle a DOWN neighbour during sunlight addition (no dimming).
+static void process_down_neighbour(
+    struct World *world, struct LightQueue *queue,
+    ivec3s pos, u32 val, u32 mask, u32 offset) {
+    handle_down_sunlight(world, queue, pos, val, mask, offset);
+}
+
+// Process each non-DOWN direction using the existing side neighbour handler.
+static void process_side_neighbours(
+    struct World *world, struct LightQueue *queue,
+    ivec3s pos, u32 val, u32 mask, u32 offset) {
+    handle_side_sunlight(world, queue, UP, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, NORTH, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, SOUTH, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, EAST, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, WEST, pos, val, mask, offset);
+}
+
 // Propagate SUNLIGHT through the queue (no dimming during downward travel).
 static void add_sunlight_propagate(
     struct World *world, struct LightQueue *queue,
@@ -104,34 +122,8 @@ static void add_sunlight_propagate(
         u32 light = world_get_light(world, node.pos),
             val = (light & mask) >> offset;
 
-        // propagate in reverse of enum Direction order so DOWN is first
-        for (enum Direction d = DOWN; (s32)d >= 0; d--) {
-            ivec3s n_pos = glms_ivec3_add(node.pos, DIR2IVEC3S(d));
-            u64 n_data = world_get_data(world, n_pos);
-            u32 n_light = chunk_data_to_light(n_data),
-                n_val = ((n_light & mask) >> offset);
-            struct Block n_block = BLOCKS[chunk_data_to_block(n_data)];
-
-            if (d == DOWN) {
-                // DOWN propagates without dimming
-                const bool allows_flow = n_val != 0 || n_block.transparent;
-                if (allows_flow && n_val < val) {
-                    world_set_light(
-                        world, n_pos,
-                        ((n_light & ~mask) | ((val << offset) & mask)));
-                    ENQUEUE(queue, ((struct LightNode){.pos=n_pos}));
-                }
-            } else {
-                // Side neighbours propagate with dimming by 1
-                if (n_val == 0 && !n_block.transparent) continue;
-                if (n_val + 1 >= val) continue;
-
-                world_set_light(
-                    world, n_pos,
-                    ((n_light & ~mask) | (((val - 1) << offset) & mask)));
-                ENQUEUE(queue, ((struct LightNode){.pos=n_pos}));
-            }
-        }
+        process_down_neighbour(world, queue, node.pos, val, mask, offset);
+        process_side_neighbours(world, queue, node.pos, val, mask, offset);
     }
 }
 
