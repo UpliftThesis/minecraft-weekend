@@ -103,14 +103,16 @@ static void process_down_neighbour(
 }
 
 // Process each non-DOWN direction using the existing side neighbour handler.
+// Must match original reverse-enumeration order: UP(4), WEST(3), EAST(2),
+// SOUTH(1), NORTH(0).
 static void process_side_neighbours(
     struct World *world, struct LightQueue *queue,
     ivec3s pos, u32 val, u32 mask, u32 offset) {
     handle_side_sunlight(world, queue, UP, pos, val, mask, offset);
-    handle_side_sunlight(world, queue, NORTH, pos, val, mask, offset);
-    handle_side_sunlight(world, queue, SOUTH, pos, val, mask, offset);
-    handle_side_sunlight(world, queue, EAST, pos, val, mask, offset);
     handle_side_sunlight(world, queue, WEST, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, EAST, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, SOUTH, pos, val, mask, offset);
+    handle_side_sunlight(world, queue, NORTH, pos, val, mask, offset);
 }
 
 // Propagate SUNLIGHT through the queue (no dimming during downward travel).
