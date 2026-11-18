@@ -247,10 +247,10 @@ static inline void emit_face(
 
         vec2s uv_offset = glms_vec2_mul(
             IVEC2S2V(uv_offset_px),
-            atlas->pixel_unit),
+            atlas->atlas.pixel_unit),
             uv_size = glms_vec2_mul(
             IVEC2S2V(uv_size_px),
-            atlas->pixel_unit);
+            atlas->atlas.pixel_unit);
 
         params->uv_min = glms_vec2_add(params->uv_min, uv_offset);
         params->uv_max = glms_vec2_add(params->uv_min, uv_size);
@@ -263,7 +263,7 @@ static void emit_regular_block_faces(
     struct ChunkMesh *self,
     struct Chunk *chunk,
     struct BlockMeshParams *params,
-    vec3s pos_w,
+    ivec3s pos_w,
     struct BlockAtlas *atlas,
     ivec3s pos)
 {
